@@ -5,7 +5,7 @@ inject-test: inject-test.o inject.o
 	g++ inject-test.o inject.o -o inject-test
 
 lagsim: lagsim.o 
-	g++ lagsim.o -o lagsim
+	g++ -lpthread lagsim.o -o lagsim
 
 pcap-test: pcap-test.o crc32.o
 	g++ -lpcap crc32.o pcap-test.o -o pcap-test

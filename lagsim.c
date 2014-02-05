@@ -6,6 +6,8 @@
 #include<stdint.h>
 #include<cstring>
 #include<cstdlib>
+#include<cstdio>
+#include<pthread.h>
 
 void usage()
 {
@@ -25,10 +27,27 @@ void usage()
   */
 }
 
+struct injector_conf_t
+{
+  int ifc;    // interface count
+  const char** ifv; // list of interface names
+};
+
+void * injector_task(void* ptr)
+{
+  injector_conf_t * conf = (injector_conf_t *) ptr;
+  printf("Hi, I'm the injector! ifc=%d\n",conf->ifc);
+  for (int i=0; i<conf->ifc; i++)
+  {
+    printf("  %s\n",conf->ifv[i]);
+  }
+
+}
+
 int main(int argc, char* argv[])
 {
-  char * iface_a = NULL;
-  char * iface_b = NULL;
+  const char * iface_a = "eth0";
+  const char * iface_b = "eth1";
   double latency = 0;
   double jitter = 0;
   double loss = 0;
@@ -67,9 +86,17 @@ int main(int argc, char* argv[])
     return 1;
   }
 
+  // configure and launch injector task
+  pthread_t injector_thread;
+  injector_conf_t injector_conf;
+  injector_conf.ifc = 2;
+  injector_conf.ifv = (const char**) malloc(injector_conf.ifc*sizeof(char*));
+  injector_conf.ifv[0] = iface_a;
+  injector_conf.ifv[1] = iface_b;
+  pthread_create(&injector_thread,NULL,injector_task,&injector_conf);
 
-  // TODO: everything else...
-  printf("%s-->%s, latency=%f\n",iface_a,iface_b,latency);
+  // wait for tasks to finish
+  pthread_join(injector_thread,NULL);
 
   return 0;
 }
