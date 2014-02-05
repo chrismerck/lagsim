@@ -1,11 +1,17 @@
 
-all: inject-test pcap-test
+all: inject-test pcap-test lagsim
 
 inject-test: inject-test.o inject.o
 	g++ inject-test.o inject.o -o inject-test
 
+lagsim: lagsim.o 
+	g++ lagsim.o -o lagsim
+
 pcap-test: pcap-test.o crc32.o
 	g++ -lpcap crc32.o pcap-test.o -o pcap-test
+
+lagsim.o: lagsim.c
+	g++ -c lagsim.c
 
 pcap-test.o: pcap-test.c
 	g++ -c pcap-test.c
@@ -20,4 +26,4 @@ inject-test.o: inject-test.c
 	g++ -c inject-test.c
 
 clean:
-	rm -rf *.o inject-test pcap-test
+	rm -rf *.o inject-test pcap-test lagsim
