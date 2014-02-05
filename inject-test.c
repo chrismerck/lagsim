@@ -22,8 +22,12 @@ int main(int argc, char *argv[])
     return -1;
   }
 
-  inject_send(p_i,(uint8_t*)packet,packet_length);
-  printf("Packet successfully injected.\n");
-
+  //inject_send(p_i,(uint8_t*)packet,packet_length);
+  for (int i=0; i<100; i++)
+  {
+    inject_send(p_i,(uint8_t*)"0123456789ABCDEFXXXX",20);
+    printf("Packet successfully injected.\n");
+    fflush(stdout);
+  }
 	return 0;
 }

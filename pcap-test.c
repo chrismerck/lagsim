@@ -2,17 +2,29 @@
  * pcap-test.c
  */
 
-#include <pcap/pcap.h>
+#include<pcap/pcap.h>
+#include<stdint.h>
+#include"crc32.h"
 
 //typedef void (*pcap_handler)(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes);
 void callback(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes)
 {
-  printf("Got packet.\n");
+  char src[24];
+  char dst[24];
+  sprintf(dst,"%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
+      bytes[0],bytes[1],bytes[2],bytes[3],
+      bytes[4],bytes[5],bytes[6],bytes[7]);
+  sprintf(src,"%02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X",
+      bytes[8],bytes[9],bytes[10],bytes[11],
+      bytes[12],bytes[13],bytes[14],bytes[15]);
+  //uint32_t crc32(uint32_t crc, const void *buf, size_t size);
+  uint32_t crc = crc32(0/*initial value*/, bytes, h->caplen);
+  printf("Got packet SRC: %s   DST: %s   CRC32: %08X\n",src,dst,crc);
 }
 
 #define IFACE_A "eth0"
 
-int main(char* argv[], int argc)
+int main(int argc, char* argv[])
 {
   char errbuf[PCAP_ERRBUF_SIZE];
   int r;
@@ -48,6 +60,13 @@ int main(char* argv[], int argc)
   if (r!=0)
   {
     fprintf(stderr,"Warning: Non-zero return from pcap_activate: %02X\n",r);
+  }
+
+  if (pcap_setdirection(p_pcap, PCAP_D_IN) != 0)
+  {
+    pcap_perror(p_pcap, (char*) "Error: Failed to set capture direction");
+    // if we were to continue, we would cause a packet storm
+    return -1;
   }
 
   // get linktype (should be LINKTYPE_ETHERNET)
