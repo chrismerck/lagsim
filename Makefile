@@ -10,8 +10,8 @@ lagsim: lagsim.o
 pcap-test: pcap-test.o crc32.o
 	g++ -lpcap crc32.o pcap-test.o -o pcap-test
 
-lagsim.o: lagsim.c
-	g++ -c lagsim.c
+lagsim.o: lagsim.cpp
+	g++ -c lagsim.cpp
 
 pcap-test.o: pcap-test.c
 	g++ -c pcap-test.c

@@ -12,3 +12,6 @@
 *.la
 *.a
 *.swp
+inject-test
+lagsim
+pcap-test
