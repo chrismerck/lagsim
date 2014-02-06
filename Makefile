@@ -4,14 +4,14 @@ all: inject-test pcap-test lagsim
 inject-test: inject-test.o inject.o
 	g++ inject-test.o inject.o -o inject-test
 
-lagsim: lagsim.o 
-	g++ -lpthread lagsim.o -o lagsim
+lagsim: lagsim.o inject.o
+	g++ -lpcap -lpthread inject.o lagsim.o -o lagsim
 
 pcap-test: pcap-test.o crc32.o
 	g++ -lpcap crc32.o pcap-test.o -o pcap-test
 
 lagsim.o: lagsim.cpp
-	g++ -c lagsim.cpp
+	g++ -g -c lagsim.cpp
 
 pcap-test.o: pcap-test.c
 	g++ -c pcap-test.c

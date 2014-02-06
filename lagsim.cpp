@@ -11,6 +11,8 @@
 #include"unistd.h"
 #include<pthread.h>
 
+#include"inject.h"
+
 #include<queue> // std::priority_queue
 
 #define QUEUE_TYPE priority_queue<queue_item_t, vector<queue_item_t>, less<queue_item_t> >
@@ -36,13 +38,30 @@ void usage()
   */
 }
 
+bool compare_timeval(const timeval * a, const timeval * b)
+{
+  // returns true if a is earlier than b
+  if (a->tv_sec < b->tv_sec)
+  {
+    return true;
+  }
+  else if (a->tv_sec > b->tv_sec)
+  {
+    return false;
+  }
+  else
+  {
+    return a->tv_usec < b->tv_usec;
+  }
+}
+
 struct queue_item_t
 {
   // scheduled transmit time
-  int xmit_time; 
+  timeval xmit_time; 
 
   // interface of target interface
-  int iface_dst;
+  int if_dst;
 
   // packet length (bytes)
   int len;
@@ -53,7 +72,7 @@ struct queue_item_t
   // comparison operator for priority queue ordering
   bool operator<(const queue_item_t &that) const
   {
-    return xmit_time < that.xmit_time;
+    return compare_timeval(&xmit_time,&that.xmit_time);
   }
 };
 
@@ -75,46 +94,262 @@ struct injector_conf_t
   QUEUE_TYPE * queue;  
 };
 
+void get_now(timeval * rv)
+{
+  // get time and convert to lower resolution timeval
+  timespec now;
+  clock_gettime(CLOCK_REALTIME, &now);
+  rv->tv_sec = now.tv_sec;
+  rv->tv_usec = now.tv_nsec/1000;
+}
+
+
 void * injector_task(void* ptr)
 {
   injector_conf_t * conf = (injector_conf_t *) ptr;
   queue_item_t next;
+  timeval now;
+  timespec wake_time;
 
-  printf("Hi, I'm the injector! ifc=%d\n",conf->ifc);
+  fprintf(stderr,"Initializing Injector...\n",conf->ifc);
+
+  // create injection sockets
+  inject_t ** inj = (inject_t**) malloc(sizeof(inject_t*) * conf->ifc);
   for (int i=0; i<conf->ifc; i++)
   {
-    printf("  %s\n",conf->ifv[i]);
+    inj[i] = inject_create(conf->ifv[i]);
+    if (inj[i]==NULL)
+    {
+      return (void*)-1;
+    }
   }
 
+  // injection loop
   while (1)
   {
+
+    // clear wake time signal
+    wake_time.tv_sec = 0;
+
+    // is it due yet?
+    get_now(&now);
+
+    // lock the queue and send all due packets
     pthread_mutex_lock(conf->queue_mutex);
-    if (!conf->queue->empty())
+    while (!conf->queue->empty())
     {
+      // get next packet due
       next = conf->queue->top();
-      printf("NEXT xmit_time=%d\n",
-          next.xmit_time);
-      conf->queue->pop();
+
+
+      if (compare_timeval(&next.xmit_time,&now))
+      {
+        // send now
+
+        //printf("SEND %s\n",conf->ifv[next.if_dst]);
+        inject_send(inj[next.if_dst], next.data, next.len);
+
+        printf("n=%08d\n",conf->queue->size());
+        fflush(stdout);
+
+        conf->queue->pop();
+      }
+      else
+      {
+        // not yet due, schedule wake up
+        wake_time.tv_sec = next.xmit_time.tv_sec;
+        wake_time.tv_nsec = next.xmit_time.tv_usec*1000;
+        break;
+      }
+    }
+
+    if (wake_time.tv_sec != 0)
+    {
+      // wait until the next packet is due,
+      //  or until we are signaled
+      //printf("cond_timedwait\n");
+      /*pthread_cond_timedwait(conf->queue_cond,
+          conf->queue_mutex,
+          &wake_time);*/
     }
     else
     {
-      printf("EMPTY\n");
+      // wait until signaled
+      //printf("cond_wait\n");
+      /*pthread_cond_wait(conf->queue_cond,
+          conf->queue_mutex);*/
     }
-    //pthread_cond_signal(conf->queue_cond);
+    //printf("wakeup\n");
     pthread_mutex_unlock(conf->queue_mutex);
-
-    usleep(1000000);
+    usleep(1000);
   }
 }
+
+struct pcap_conf_t
+{
+  // interface number 
+  int if_idx;                      
+
+  // interface name
+  const char* if_name;             
+
+  // queue lock
+  pthread_mutex_t * queue_mutex;  
+
+  // queue update signal
+  pthread_cond_t * queue_cond;   
+
+  // datastructure holding packets
+  QUEUE_TYPE * queue;  
+};
+
+double g_latency = 0;
+double g_jitter = 0;
+double g_loss = 0;
+int g_mtu = 1500;
+timeval network_delay(timeval recv_time)
+{
+  // base latency
+  long delta_us = (int) (g_latency*1000);
+
+  // add jitter
+  int jitter_us = ((int)(g_jitter*1000));
+  if (jitter_us>0)
+  {
+    delta_us += rand()%jitter_us;
+  }
+
+  // compute absolute transmit time
+  timeval xmit_time;
+  xmit_time.tv_sec = recv_time.tv_sec + (delta_us/1000000);
+  xmit_time.tv_usec = recv_time.tv_usec + (delta_us%1000000);
+  return xmit_time;
+}
+
+void callback(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes)
+{
+  pcap_conf_t * conf = (pcap_conf_t *) user;
+  queue_item_t item;
+  queue_item_t next;
+
+  // set transmit time
+  item.xmit_time = network_delay(h->ts);
+
+  // set destination
+  item.if_dst = (conf->if_idx==0) ? 1 : 0; 
+
+  // copy packet 
+  // (because *bytes may be disposed after callback returns)
+  item.len = h->caplen;
+  item.data = (uint8_t *) malloc(item.len);  
+  memcpy(item.data, bytes, item.len);
+
+  // enqueue to injector
+  pthread_mutex_lock(conf->queue_mutex);
+  if (!conf->queue->empty())
+  {
+    next = conf->queue->top();
+  }
+  else
+  {
+    // queue empty, so there is no next packet
+    next.xmit_time.tv_sec = 0;
+    //printf("no_next\n");
+  }
+
+  // debug
+  /*printf("recv = %d %d\n",
+      h->ts.tv_sec,
+      h->ts.tv_usec);
+  printf("item = %d %d\n",
+      item.xmit_time.tv_sec,
+      item.xmit_time.tv_usec);
+  printf("next = %d %d\n",
+      next.xmit_time.tv_sec,
+      next.xmit_time.tv_usec);*/
+
+  conf->queue->push(item);
+  //printf("push\n");
+  if (compare_timeval(&item.xmit_time,&next.xmit_time))
+  {
+    // wake up injector b/c new packet needs to be sent
+    //  earlier than previous 'next' packet
+    //printf("cond_signal\n");
+    pthread_cond_signal(conf->queue_cond);
+  }
+  pthread_mutex_unlock(conf->queue_mutex);
+
+  return;
+}
+
+
+void * pcap_task(void* ptr)
+{
+  pcap_conf_t * conf = (pcap_conf_t *) ptr;
+  char errbuf[PCAP_ERRBUF_SIZE];
+  int r;
+  pcap_t* p_pcap;
+
+  // TODO: ingore packets sent to iface MAC
+
+  // get a new packet capture handle
+  p_pcap = pcap_create(conf->if_name, errbuf);
+  if (p_pcap==NULL)
+  {
+    fprintf(stderr,"Error: Failed to create pcap handle: %s",errbuf);
+    return (void*) -1;
+  }
+
+  // capture packets of any size
+  pcap_set_snaplen(p_pcap, 65535);
+
+  // set promiscuous mode
+  pcap_set_promisc(p_pcap, 1);
+
+  // use high-precision host-synchronized timestamps from adaptor
+  switch (pcap_set_tstamp_type(p_pcap, PCAP_TSTAMP_ADAPTER))
+  {
+    case PCAP_WARNING_TSTAMP_TYPE_NOTSUP:
+      fprintf(stderr,"Warning: Interface does not support this timestamp type.\n");
+      break;
+    case PCAP_ERROR_CANTSET_TSTAMP_TYPE:
+      fprintf(stderr,"Warning: Interface does not support setting the timestamp type.\n");
+      break;
+  }
+
+  // activate the handle
+  r = pcap_activate(p_pcap);
+  if (r!=0)
+  {
+    fprintf(stderr,"Warning: Non-zero return from pcap_activate: %02X\n",r);
+  }
+
+  if (pcap_setdirection(p_pcap, PCAP_D_IN) != 0)
+  {
+    pcap_perror(p_pcap, (char*) "Error: Failed to set capture direction");
+    // if we were to continue, we would cause a packet storm
+    return (void*) -1;
+  }
+
+  // get linktype (should be LINKTYPE_ETHERNET)
+  int i_linktype = pcap_datalink(p_pcap);
+  fprintf(stderr,"Info: Linktype is %02X.\n",i_linktype);
+
+  // capture packets until interrupt
+  pcap_loop(p_pcap, 0/*infinity*/, callback, (u_char*) conf/*user*/);
+  printf("Finished.");
+
+  // cleanup
+  pcap_close(p_pcap);
+
+  return (void*) 0;
+}
+
 
 int main(int argc, char* argv[])
 {
   const char * iface_a = "eth0";
   const char * iface_b = "eth1";
-  double latency = 0;
-  double jitter = 0;
-  double loss = 0;
-  int mtu = 1500;
 
   // process command line options
   int len;
@@ -131,7 +366,7 @@ int main(int argc, char* argv[])
     else if (strcmp(opt,"--iface-b")==0)
       iface_b = parm;
     else if (strcmp(opt,"--latency")==0)
-      latency = strtod(parm,NULL);
+      g_latency = strtod(parm,NULL);
     else
     {
       fprintf(stderr,"Error processing options.\n\n");
@@ -152,12 +387,10 @@ int main(int argc, char* argv[])
   // setup packet queue and synchronization structures
   QUEUE_TYPE _queue;
   QUEUE_TYPE * queue = &_queue;
-  pthread_mutex_t _queue_mutex;
+  pthread_mutex_t _queue_mutex = PTHREAD_MUTEX_INITIALIZER;
   pthread_mutex_t * queue_mutex = &_queue_mutex;
-  pthread_cond_t _queue_cond;
+  pthread_cond_t _queue_cond = PTHREAD_COND_INITIALIZER;
   pthread_cond_t * queue_cond = &_queue_cond;
-  pthread_mutex_init(queue_mutex,NULL);
-  pthread_cond_init(queue_cond,NULL);
 
   // configure and launch injector task
   injector_conf_t injector_conf;
@@ -171,23 +404,24 @@ int main(int argc, char* argv[])
   pthread_t injector_thread;
   pthread_create(&injector_thread,NULL,injector_task,&injector_conf);
 
-  // test
-  queue_item_t item;
-  for (int i=0; i<30; i++)
+  // configure and launch pcap tasks
+  pthread_t pcap_thread[2];
+  pcap_conf_t pcap_conf[2];
+  for (int i=0; i<2; i++)
   {
-    item.xmit_time = i;
-
-    pthread_mutex_lock(queue_mutex);
-    queue->push(item);
-    pthread_mutex_unlock(queue_mutex);
-
-    usleep(100000);
+    pcap_conf[i].if_idx = i;
+    pcap_conf[i].if_name = (i==0) ? iface_a : iface_b;
+    pcap_conf[i].queue = queue;
+    pcap_conf[i].queue_mutex = queue_mutex;
+    pcap_conf[i].queue_cond = queue_cond;
+    pthread_create(&pcap_thread[i],NULL,pcap_task,&pcap_conf[i]);
   }
 
   // wait for tasks to finish
   pthread_join(injector_thread,NULL);
 
   // cleanup
+  free(injector_conf.ifv);
   pthread_mutex_destroy(queue_mutex);
   pthread_cond_destroy(queue_cond);
   pthread_exit(NULL);
