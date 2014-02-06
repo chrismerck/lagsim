@@ -124,9 +124,30 @@ void * injector_task(void* ptr)
     }
   }
 
+  // clear wake time signal
+  wake_time.tv_sec = 0;
+
   // injection loop
+  pthread_mutex_lock(conf->queue_mutex);
   while (1)
   {
+    if (wake_time.tv_sec != 0)
+    {
+      // wait until the next packet is due,
+      //  or until we are signaled
+      //printf("cond_timedwait\n");
+      pthread_cond_timedwait(conf->queue_cond,
+          conf->queue_mutex,
+          &wake_time);
+    }
+    else
+    {
+      // wait until signaled
+      //printf("cond_wait\n");
+      pthread_cond_wait(conf->queue_cond,
+          conf->queue_mutex);
+    }
+    //printf("Woke up.\n");
 
     // clear wake time signal
     wake_time.tv_sec = 0;
@@ -134,13 +155,13 @@ void * injector_task(void* ptr)
     // is it due yet?
     get_now(&now);
 
+    //printf("queue n=%08d\n",conf->queue->size());
+
     // lock the queue and send all due packets
-    pthread_mutex_lock(conf->queue_mutex);
     while (!conf->queue->empty())
     {
       // get next packet due
       next = conf->queue->top();
-
 
       if (compare_timeval(&next.xmit_time,&now))
       {
@@ -148,9 +169,7 @@ void * injector_task(void* ptr)
 
         //printf("SEND %s\n",conf->ifv[next.if_dst]);
         inject_send(inj[next.if_dst], next.data, next.len);
-
-        //printf("n=%08d\n",conf->queue->size());
-        //fflush(stdout);
+        free(next.data); 
 
         conf->queue->pop();
       }
@@ -163,25 +182,10 @@ void * injector_task(void* ptr)
       }
     }
 
-    if (wake_time.tv_sec != 0)
-    {
-      // wait until the next packet is due,
-      //  or until we are signaled
-      //printf("cond_timedwait\n");
-      /*pthread_cond_timedwait(conf->queue_cond,
-          conf->queue_mutex,
-          &wake_time);*/
-    }
-    else
-    {
-      // wait until signaled
-      //printf("cond_wait\n");
-      /*pthread_cond_wait(conf->queue_cond,
-          conf->queue_mutex);*/
-    }
-    //printf("wakeup\n");
+    // let producers work
     pthread_mutex_unlock(conf->queue_mutex);
-    usleep(1000);
+    usleep(1);
+    pthread_mutex_lock(conf->queue_mutex);
   }
 }
 
@@ -246,19 +250,17 @@ void callback(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes)
 
   // enqueue to injector
   pthread_mutex_lock(conf->queue_mutex);
+  bool was_empty = false;
   if (!conf->queue->empty())
   {
     next = conf->queue->top();
-  }
-  else
-  {
-    // queue empty, so there is no next packet
-    next.xmit_time.tv_sec = 0;
-    //printf("no_next\n");
+    was_empty = true;
   }
 
-  // debug
-  /*printf("recv = %d %d\n",
+  //printf("PCAP if=%d\n",conf->if_idx);
+
+  /*
+  printf("recv = %d %d\n",
       h->ts.tv_sec,
       h->ts.tv_usec);
   printf("item = %d %d\n",
@@ -266,16 +268,28 @@ void callback(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes)
       item.xmit_time.tv_usec);
   printf("next = %d %d\n",
       next.xmit_time.tv_sec,
-      next.xmit_time.tv_usec);*/
+      next.xmit_time.tv_usec);
+      */
 
   conf->queue->push(item);
-  //printf("push\n");
-  if (compare_timeval(&item.xmit_time,&next.xmit_time))
+  timeval new_top_time = conf->queue->top().xmit_time;
+  if (was_empty || conf->queue->top().xmit_time.tv_usec == item.xmit_time.tv_usec)
   {
     // wake up injector b/c new packet needs to be sent
     //  earlier than previous 'next' packet
     //printf("cond_signal\n");
-    pthread_cond_signal(conf->queue_cond);
+    int r = pthread_cond_broadcast(conf->queue_cond);
+    //printf("cond_signal-->%d\n",r);
+  }
+  else
+  {
+   /* printf("no signal\n");
+    printf("item = %d %d\n",
+        item.xmit_time.tv_sec,
+        item.xmit_time.tv_usec);
+    printf("top = %d %d\n",
+        new_top_time.tv_sec,
+        new_top_time.tv_usec);*/
   }
   pthread_mutex_unlock(conf->queue_mutex);
 
