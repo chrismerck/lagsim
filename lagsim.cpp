@@ -186,6 +186,20 @@ void * injector_task(void* ptr)
   }
 }
 
+struct modem_state_t
+{
+  // modem queue behavior and state
+  int queue_max;      // bytes
+  timeval next_free_time; 
+  double kbps;        // kbits/s
+  double red_thresh;  // 0-1
+
+  // network behavior
+  double latency; //ms
+  double jitter;  //ms
+  double loss;    //0-1
+};
+
 struct pcap_conf_t
 {
   // interface number 
@@ -202,19 +216,19 @@ struct pcap_conf_t
 
   // datastructure holding packets
   QUEUE_TYPE * queue;  
+
+  // modem state 
+  modem_state_t modem;
 };
 
-double g_latency = 0;
-double g_jitter = 0;
-double g_loss = 0;
-int g_mtu = 1500;
-timeval network_delay(timeval recv_time)
+timeval network_model(modem_state_t * modem, 
+    timeval recv_time, const u_char *bytes, int len)
 {
   // base latency
-  long delta_us = (int) (g_latency*1000);
+  long delta_us = (int) (modem->latency*1000);
 
   // add jitter
-  int jitter_us = ((int)(g_jitter*1000));
+  int jitter_us = ((int)(modem->jitter*1000));
   if (jitter_us>0)
   {
     delta_us += rand()%jitter_us;
@@ -234,7 +248,8 @@ void callback(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes)
   queue_item_t next;
 
   // set transmit time
-  item.xmit_time = network_delay(h->ts);
+  item.xmit_time = network_model(&conf->modem,
+      h->ts,bytes,h->caplen);
 
   // set destination
   item.if_dst = (conf->if_idx==0) ? 1 : 0; 
@@ -336,6 +351,12 @@ int main(int argc, char* argv[])
 {
   const char * iface_a = "eth0";
   const char * iface_b = "eth1";
+  double opt_latency = 0;
+  double opt_jitter = 0;
+  double opt_loss = 0;
+  double opt_bandwidth = -1;
+  double opt_red = 100;
+  double opt_queue = 64;
 
   // process command line options
   if (argc==1 || (argc%2)==0)
@@ -357,9 +378,17 @@ int main(int argc, char* argv[])
     else if (strcmp(opt,"--iface-b")==0)
       iface_b = parm;
     else if (strcmp(opt,"--latency")==0)
-      g_latency = strtod(parm,NULL);
+      opt_latency = strtod(parm,NULL);
     else if (strcmp(opt,"--jitter")==0)
-      g_jitter = strtod(parm,NULL);
+      opt_jitter = strtod(parm,NULL);
+    else if (strcmp(opt,"--loss")==0)
+      opt_loss = strtod(parm,NULL);
+    else if (strcmp(opt,"--bandwidth")==0)
+      opt_bandwidth = strtod(parm,NULL);
+    else if (strcmp(opt,"--red")==0)
+      opt_red = strtod(parm,NULL);
+    else if (strcmp(opt,"--queue")==0)
+      opt_queue = strtod(parm,NULL);
     else
     {
       fprintf(stderr,"Error processing options.\n\n");
@@ -407,6 +436,13 @@ int main(int argc, char* argv[])
     pcap_conf[i].queue = queue;
     pcap_conf[i].queue_mutex = queue_mutex;
     pcap_conf[i].queue_cond = queue_cond;
+    pcap_conf[i].modem.queue_max = opt_queue;
+    get_now(&pcap_conf[i].modem.next_free_time);
+    pcap_conf[i].modem.kbps = opt_bandwidth;
+    pcap_conf[i].modem.red_thresh = opt_red;
+    pcap_conf[i].modem.latency = opt_latency;
+    pcap_conf[i].modem.jitter = opt_jitter;
+    pcap_conf[i].modem.loss = opt_loss;
     pthread_create(&pcap_thread[i],NULL,pcap_task,&pcap_conf[i]);
   }
 
