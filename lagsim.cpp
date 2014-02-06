@@ -17,22 +17,25 @@
 
 #define QUEUE_TYPE priority_queue<queue_item_t, vector<queue_item_t>, less<queue_item_t> >
 
-
 using namespace std;
 
 void usage()
 {
   printf("Usage: lagsim [OPTIONS]\n");
   printf("\n");
-  printf("  --iface-a iface    specify interface A name\n");
-  printf("  --iface-b iface    specify interface B name\n");
-  printf("  --latency ms       average one-way latency\n");
-  printf("  --jitter  ms       random variation latency (+-)\n");
-  printf("  --loss    percent  base packet loss fraction\n");
-  printf("  --mtu     bytes    set maximum transmit unit\n");
+  printf("  --iface-a  iface    specify interface A name (default = eth0)\n");
+  printf("  --iface-b  iface    specify interface B name (default = eth1)\n");
+  printf("  --latency  ms       network latency (default = 0ms)\n");
+  printf("  --jitter   ms       network random jitter (default = 0ms)\n");
+  printf("  --loss     percent  network packet loss (default = 0%)\n");
+  printf("  --mtu      bytes    modem maximum transmit unit (default = 1500B)\n");
+  printf("  --bandwith kbps     modem baud rate (default = infinite)\n");
+  printf("  --queue    kB       modem queue size (default = 64kB)\n");
+  printf("  --red      percent  Random Early Dropping threshold (default = 100%)\n");
+  printf("\n");
+  printf("Report bugs to chrismerck@gmail.com.\n");
   /*
   printf("  --pep               run performance enhancing proxy (PEP)\n");
-  printf("  --bandwidth kbps    simulate bandwidth limit \n");
   // TODO: support more advanced latency models
   // What about ICMP replies for
   */
@@ -135,7 +138,6 @@ void * injector_task(void* ptr)
     {
       // wait until the next packet is due,
       //  or until we are signaled
-      //printf("cond_timedwait\n");
       pthread_cond_timedwait(conf->queue_cond,
           conf->queue_mutex,
           &wake_time);
@@ -143,19 +145,15 @@ void * injector_task(void* ptr)
     else
     {
       // wait until signaled
-      //printf("cond_wait\n");
       pthread_cond_wait(conf->queue_cond,
           conf->queue_mutex);
     }
-    //printf("Woke up.\n");
 
     // clear wake time signal
     wake_time.tv_sec = 0;
 
     // is it due yet?
     get_now(&now);
-
-    //printf("queue n=%08d\n",conf->queue->size());
 
     // lock the queue and send all due packets
     while (!conf->queue->empty())
@@ -166,11 +164,8 @@ void * injector_task(void* ptr)
       if (compare_timeval(&next.xmit_time,&now))
       {
         // send now
-
-        //printf("SEND %s\n",conf->ifv[next.if_dst]);
         inject_send(inj[next.if_dst], next.data, next.len);
         free(next.data); 
-
         conf->queue->pop();
       }
       else
@@ -183,9 +178,11 @@ void * injector_task(void* ptr)
     }
 
     // let producers work
+#if 0 // TODO: profile with and without this block
     pthread_mutex_unlock(conf->queue_mutex);
     usleep(1);
     pthread_mutex_lock(conf->queue_mutex);
+#endif
   }
 }
 
@@ -256,40 +253,14 @@ void callback(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes)
     next = conf->queue->top();
     was_empty = true;
   }
-
-  //printf("PCAP if=%d\n",conf->if_idx);
-
-  /*
-  printf("recv = %d %d\n",
-      h->ts.tv_sec,
-      h->ts.tv_usec);
-  printf("item = %d %d\n",
-      item.xmit_time.tv_sec,
-      item.xmit_time.tv_usec);
-  printf("next = %d %d\n",
-      next.xmit_time.tv_sec,
-      next.xmit_time.tv_usec);
-      */
-
   conf->queue->push(item);
   timeval new_top_time = conf->queue->top().xmit_time;
   if (was_empty || conf->queue->top().xmit_time.tv_usec == item.xmit_time.tv_usec)
   {
     // wake up injector b/c new packet needs to be sent
-    //  earlier than previous 'next' packet
-    //printf("cond_signal\n");
-    int r = pthread_cond_broadcast(conf->queue_cond);
-    //printf("cond_signal-->%d\n",r);
-  }
-  else
-  {
-   /* printf("no signal\n");
-    printf("item = %d %d\n",
-        item.xmit_time.tv_sec,
-        item.xmit_time.tv_usec);
-    printf("top = %d %d\n",
-        new_top_time.tv_sec,
-        new_top_time.tv_usec);*/
+    //  earlier than previous 'next' packet,
+    //  or the queue was empty and injector is waiting indefinitely
+    pthread_cond_broadcast(conf->queue_cond);
   }
   pthread_mutex_unlock(conf->queue_mutex);
 
@@ -305,6 +276,7 @@ void * pcap_task(void* ptr)
   pcap_t* p_pcap;
 
   // TODO: ingore packets sent to iface MAC
+  //  This would compete the pseudo-bridge
 
   // get a new packet capture handle
   p_pcap = pcap_create(conf->if_name, errbuf);
@@ -351,7 +323,7 @@ void * pcap_task(void* ptr)
 
   // capture packets until interrupt
   pcap_loop(p_pcap, 0/*infinity*/, callback, (u_char*) conf/*user*/);
-  printf("Finished.");
+  fprintf(stderr,"Warning: pcap_loop returned.\n");
 
   // cleanup
   pcap_close(p_pcap);
@@ -366,6 +338,11 @@ int main(int argc, char* argv[])
   const char * iface_b = "eth1";
 
   // process command line options
+  if (argc==1 || (argc%2)==0)
+  {
+    usage();
+    return 1;
+  }
   int len;
   int i=1;
   char* opt;
