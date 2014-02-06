@@ -72,7 +72,7 @@ struct queue_item_t
   // comparison operator for priority queue ordering
   bool operator<(const queue_item_t &that) const
   {
-    return compare_timeval(&xmit_time,&that.xmit_time);
+    return compare_timeval(&that.xmit_time,&xmit_time);
   }
 };
 
@@ -149,8 +149,8 @@ void * injector_task(void* ptr)
         //printf("SEND %s\n",conf->ifv[next.if_dst]);
         inject_send(inj[next.if_dst], next.data, next.len);
 
-        printf("n=%08d\n",conf->queue->size());
-        fflush(stdout);
+        //printf("n=%08d\n",conf->queue->size());
+        //fflush(stdout);
 
         conf->queue->pop();
       }
@@ -367,6 +367,8 @@ int main(int argc, char* argv[])
       iface_b = parm;
     else if (strcmp(opt,"--latency")==0)
       g_latency = strtod(parm,NULL);
+    else if (strcmp(opt,"--jitter")==0)
+      g_jitter = strtod(parm,NULL);
     else
     {
       fprintf(stderr,"Error processing options.\n\n");
