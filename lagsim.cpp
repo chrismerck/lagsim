@@ -33,15 +33,11 @@ void usage()
   printf("  --mtu      bytes    modem maximum transmit unit (default = 1500B)\n");
   printf("  --kbps     kbps     modem baud rate (default = infinite)\n");
   printf("  --queue    kB       modem queue size (default = 64kB)\n");
-  printf("  --red      percent  Random Early Dropping threshold (default = 100%)\n");
+  //printf("  --red      percent  Random Early Dropping threshold (default = 100%)\n");
+  //printf("  --pep               run performance enhancing proxy (PEP)\n");
   printf("  --verbose  0|1      verbosity level (default=0)\n");
   printf("\n");
   printf("Report bugs to chrismerck@gmail.com.\n");
-  /*
-  printf("  --pep               run performance enhancing proxy (PEP)\n");
-  // TODO: support more advanced latency models
-  // What about ICMP replies for
-  */
 }
 
 bool compare_timeval(const timeval * a, const timeval * b)
@@ -519,20 +515,7 @@ int main(int argc, char* argv[])
         goto cleanup;
         break;
       default:
-        printf("***Status***\n");
-        for (int i=0; i<2; i++)
-        {
-          printf("  Interface %s\n", pcap_conf[i].if_name);
-          modem_state_t modem = pcap_conf[i].modem;
-          timeval tmp;
-          get_now(&tmp);
-          timersub(&modem.next_free_time,&tmp,&tmp);
-          double queue_delay = max(0.,tmp.tv_sec+tmp.tv_usec/1000000.);
-          printf("    Queue Delay: %1.0f ms\n",queue_delay*1000);
-          printf("    Queue Size: %1.0f KB\n",queue_delay*modem.kbps*8);
-        }
-        printf("\n");
-
+        break;
     }
   }
 
