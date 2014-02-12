@@ -19,6 +19,8 @@
 
 using namespace std;
 
+bool verbose = false;
+
 void usage()
 {
   printf("Usage: lagsim [OPTIONS]\n");
@@ -29,9 +31,10 @@ void usage()
   printf("  --jitter   ms       network random jitter (default = 0ms)\n");
   printf("  --loss     percent  network packet loss (default = 0%)\n");
   printf("  --mtu      bytes    modem maximum transmit unit (default = 1500B)\n");
-  printf("  --bandwith kbps     modem baud rate (default = infinite)\n");
+  printf("  --kbps     kbps     modem baud rate (default = infinite)\n");
   printf("  --queue    kB       modem queue size (default = 64kB)\n");
   printf("  --red      percent  Random Early Dropping threshold (default = 100%)\n");
+  printf("  --verbose  0|1      verbosity level (default=0)\n");
   printf("\n");
   printf("Report bugs to chrismerck@gmail.com.\n");
   /*
@@ -167,6 +170,11 @@ void * injector_task(void* ptr)
         inject_send(inj[next.if_dst], next.data, next.len);
         free(next.data); 
         conf->queue->pop();
+        if (verbose)
+        {
+          printf("INJECT %s %d qs=%d\n",
+             conf->ifv[next.if_dst], next.len, conf->queue->size());
+        }
       }
       else
       {
@@ -222,12 +230,32 @@ struct pcap_conf_t
 };
 
 timeval network_model(modem_state_t * modem, 
-    timeval recv_time, const u_char *bytes, int len)
+    timeval recv_time, const u_char *bytes, int len,
+    const char * if_name)
 {
-  // base latency
+  // NOTE: queue simulated by 'next_free_time' variable 
+
+  // handle idling queue
+  if (compare_timeval(&modem->next_free_time,&recv_time))
+  {
+    modem->next_free_time = recv_time;
+  }
+
+  // packet queue delay, if kbps given
+  double f_queuing_time = 0;
+  if (modem->kbps != 0)
+  {
+    f_queuing_time = ((double)len*8./1000.)/modem->kbps;
+  }
+  timeval queuing_time;
+  queuing_time.tv_sec = (long)f_queuing_time;
+  queuing_time.tv_usec = (f_queuing_time-queuing_time.tv_sec)*1000000;
+  timeradd(&modem->next_free_time,&queuing_time,&modem->next_free_time);
+
+  // network latency
   long delta_us = (int) (modem->latency*1000);
 
-  // add jitter
+  // add network jitter
   int jitter_us = ((int)(modem->jitter*1000));
   if (jitter_us>0)
   {
@@ -236,8 +264,14 @@ timeval network_model(modem_state_t * modem,
 
   // compute absolute transmit time
   timeval xmit_time;
-  xmit_time.tv_sec = recv_time.tv_sec + (delta_us/1000000);
-  xmit_time.tv_usec = recv_time.tv_usec + (delta_us%1000000);
+  xmit_time.tv_sec = modem->next_free_time.tv_sec + (delta_us/1000000);
+  xmit_time.tv_usec = modem->next_free_time.tv_usec + (delta_us%1000000);
+
+  if (verbose)
+  {
+    printf("NET_MODEL %s\t %d\t tq=%f %d %d\t\n",if_name,len,f_queuing_time,queuing_time.tv_sec,queuing_time.tv_usec);
+  }
+
   return xmit_time;
 }
 
@@ -249,7 +283,8 @@ void callback(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes)
 
   // set transmit time
   item.xmit_time = network_model(&conf->modem,
-      h->ts,bytes,h->caplen);
+      h->ts,bytes,h->caplen,
+      conf->if_name);
 
   // set destination
   item.if_dst = (conf->if_idx==0) ? 1 : 0; 
@@ -354,7 +389,7 @@ int main(int argc, char* argv[])
   double opt_latency = 0;
   double opt_jitter = 0;
   double opt_loss = 0;
-  double opt_bandwidth = -1;
+  double opt_kbps = 0; // kbps
   double opt_red = 100;
   double opt_queue = 64;
 
@@ -383,12 +418,14 @@ int main(int argc, char* argv[])
       opt_jitter = strtod(parm,NULL);
     else if (strcmp(opt,"--loss")==0)
       opt_loss = strtod(parm,NULL);
-    else if (strcmp(opt,"--bandwidth")==0)
-      opt_bandwidth = strtod(parm,NULL);
+    else if (strcmp(opt,"--kbps")==0)
+      opt_kbps = strtod(parm,NULL);
     else if (strcmp(opt,"--red")==0)
       opt_red = strtod(parm,NULL);
     else if (strcmp(opt,"--queue")==0)
       opt_queue = strtod(parm,NULL);
+    else if (strcmp(opt,"--verbose")==0)
+      verbose = (bool) atoi(parm);
     else
     {
       fprintf(stderr,"Error processing options.\n\n");
@@ -437,8 +474,8 @@ int main(int argc, char* argv[])
     pcap_conf[i].queue_mutex = queue_mutex;
     pcap_conf[i].queue_cond = queue_cond;
     pcap_conf[i].modem.queue_max = opt_queue;
-    get_now(&pcap_conf[i].modem.next_free_time);
-    pcap_conf[i].modem.kbps = opt_bandwidth;
+    timerclear(&pcap_conf[i].modem.next_free_time);
+    pcap_conf[i].modem.kbps = opt_kbps;
     pcap_conf[i].modem.red_thresh = opt_red;
     pcap_conf[i].modem.latency = opt_latency;
     pcap_conf[i].modem.jitter = opt_jitter;
