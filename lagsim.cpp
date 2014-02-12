@@ -484,9 +484,34 @@ int main(int argc, char* argv[])
   }
 
   // wait for tasks to finish
-  pthread_join(injector_thread,NULL);
+  //pthread_join(injector_thread,NULL);
+  while (true)
+  {
+    switch (getchar())
+    {
+      case 'q':
+        printf("Exiting...\n");
+        goto cleanup;
+        break;
+      default:
+        printf("***Status***\n");
+        for (int i=0; i<2; i++)
+        {
+          printf("  Interface %s\n", pcap_conf[i].if_name);
+          modem_state_t modem = pcap_conf[i].modem;
+          timeval tmp;
+          get_now(&tmp);
+          timersub(&modem.next_free_time,&tmp,&tmp);
+          double queue_delay = max(0.,tmp.tv_sec+tmp.tv_usec/1000000.);
+          printf("    Queue Delay: %1.0f ms\n",queue_delay*1000);
+        }
+        printf("\n");
+
+    }
+  }
 
   // cleanup
+cleanup:
   free(injector_conf.ifv);
   pthread_mutex_destroy(queue_mutex);
   pthread_cond_destroy(queue_cond);
