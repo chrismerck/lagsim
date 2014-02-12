@@ -233,6 +233,7 @@ timeval network_model(modem_state_t * modem,
     timeval recv_time, const u_char *bytes, int len,
     const char * if_name)
 {
+  bool drop=false;
   // NOTE: queue simulated by 'next_free_time' variable 
 
   // handle idling queue
@@ -252,10 +253,24 @@ timeval network_model(modem_state_t * modem,
   queuing_time.tv_usec = (f_queuing_time-queuing_time.tv_sec)*1000000;
   timeradd(&modem->next_free_time,&queuing_time,&modem->next_free_time);
 
-  // network latency
+  // queue overflow
+  timeval tmp;
+  timersub(&modem->next_free_time,&recv_time,&tmp);
+  double queue_delay = max(0.,tmp.tv_sec+tmp.tv_usec/1000000.);
+  double queue_size = queue_delay*modem->kbps/8.;
+  if (modem->queue_max && queue_size > (double)modem->queue_max)
+  {
+    // hard-drop
+    drop = true;
+
+    // restore queue to previous level
+    timersub(&modem->next_free_time,&queuing_time,&modem->next_free_time);
+  }
+
+  // systemic latency (not due to queuing)
   long delta_us = (int) (modem->latency*1000);
 
-  // add network jitter
+  // systemic jitter (not due to queuing)
   int jitter_us = ((int)(modem->jitter*1000));
   if (jitter_us>0)
   {
@@ -264,12 +279,17 @@ timeval network_model(modem_state_t * modem,
 
   // compute absolute transmit time
   timeval xmit_time;
-  xmit_time.tv_sec = modem->next_free_time.tv_sec + (delta_us/1000000);
-  xmit_time.tv_usec = modem->next_free_time.tv_usec + (delta_us%1000000);
+  timerclear(&xmit_time);
+  if (!drop)
+  {
+    xmit_time.tv_sec = modem->next_free_time.tv_sec + (delta_us/1000000);
+    xmit_time.tv_usec = modem->next_free_time.tv_usec + (delta_us%1000000);
+  }
 
   if (verbose)
   {
-    printf("NET_MODEL %s\t %d\t tq=%f %d %d\t\n",if_name,len,f_queuing_time,queuing_time.tv_sec,queuing_time.tv_usec);
+    printf("NET_MODEL %s\t %d\t q_size %1.0f KB\t %s\n",if_name,len,queue_size,
+        drop?"DROP":"");
   }
 
   return xmit_time;
@@ -285,6 +305,11 @@ void callback(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes)
   item.xmit_time = network_model(&conf->modem,
       h->ts,bytes,h->caplen,
       conf->if_name);
+  if (item.xmit_time.tv_sec==0)
+  {
+    // packet dropped
+    return;
+  }
 
   // set destination
   item.if_dst = (conf->if_idx==0) ? 1 : 0; 
@@ -391,7 +416,7 @@ int main(int argc, char* argv[])
   double opt_loss = 0;
   double opt_kbps = 0; // kbps
   double opt_red = 100;
-  double opt_queue = 64;
+  double opt_queue = 0; // KB
 
   // process command line options
   if (argc==1 || (argc%2)==0)
@@ -504,6 +529,7 @@ int main(int argc, char* argv[])
           timersub(&modem.next_free_time,&tmp,&tmp);
           double queue_delay = max(0.,tmp.tv_sec+tmp.tv_usec/1000000.);
           printf("    Queue Delay: %1.0f ms\n",queue_delay*1000);
+          printf("    Queue Size: %1.0f KB\n",queue_delay*modem.kbps*8);
         }
         printf("\n");
 
